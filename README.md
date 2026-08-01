@@ -26,4 +26,5 @@ This document guides you through using the Shiny app to explore single-cell RNA 
 2. Run the App: In the RStudio Console (usually the bottom-left panel), copy and paste the following command, then press **Enter**:
 
 ```r
-shiny::runGitHub("New_shiny_app", "DevGenBasel", script = "new_shiny_app.R")
+install.packages("shiny") #only do it once
+shiny::runGitHub("New_shiny_app", "DevGenBasel", ref = "main")
