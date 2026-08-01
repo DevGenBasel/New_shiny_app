@@ -28,6 +28,7 @@ This document guides you through using the Shiny app to explore single-cell RNA 
 ```r
 install.packages("shiny") #only do it once
 shiny::runGitHub("New_shiny_app", "DevGenBasel", ref = "main")
+```
 
 ## Part 3: Using the App
 
