@@ -17,6 +17,7 @@ ui <- fluidPage(
   titlePanel("Gene Expression Visualization"),
   theme = bs_theme(version = 5, bootswatch = "lumen"),
   
+  # Define the sidebar
   sidebarLayout(
     sidebarPanel(
       tags$img(
@@ -79,6 +80,7 @@ ui <- fluidPage(
       width = 3
     ),
     
+    # Define the cards
     mainPanel(
       fluidRow(
         column(6,
@@ -404,29 +406,32 @@ server <- function(input, output, session) {
     withProgress(message = "Calculating Differential Expression...", value = 0, {
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
       
-      if ("genotype" %in% colnames(subset_obj@meta.data)) {
-        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
-      }
-      
-      incProgress(0.1, detail = "Subsetting data...")
-      
-      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
-      
-      subset_obj <- NormalizeData(subset_obj) %>%
-        FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
-      incProgress(0.3, detail = "Normalizing data...")
+      incProgress(0.2, detail = "Preparing data...")
       
       tryCatch({
-        # Pass matrix and vector directly to bypass defunct GetAssayData(slot=...) inside presto
-        expr_mat <- LayerData(subset_obj, layer = "data")
-        group_vec <- subset_obj$genotype
+        Idents(subset_obj) <- subset_obj$genotype
         
-        de_wilcox <- wilcoxauc(X = expr_mat, group = group_vec) %>%
-          filter(group == input$genotype2) %>%
-          mutate(DE = abs(logFC) > log(1.1) & padj < 0.01) %>%
-          mutate(DEG = ifelse(DE, feature, NA))
-        incProgress(0.7, detail = "Calculating DE...")
+        incProgress(0.4, detail = "Running Wilcoxon test...")
+        
+        de_res <- FindMarkers(
+          subset_obj,
+          ident.1 = input$genotype2,
+          ident.2 = input$genotype1,
+          test.use = "wilcox",
+          logfc.threshold = 0,
+          min.pct = 0.1
+        )
+        
+        de_wilcox <- de_res %>%
+          tibble::rownames_to_column(var = "feature") %>%
+          rename(logFC = avg_log2FC, padj = p_val_adj) %>%
+          mutate(
+            padj = ifelse(padj == 0, .Machine$double.xmin, padj),
+            DE = abs(logFC) > log2(1.1) & padj < 0.01,
+            DEG = ifelse(DE, feature, NA)
+          )
+        
+        incProgress(0.8, detail = "Rendering results...")
         
         initial_xlim <- c(min(de_wilcox$logFC, na.rm = TRUE), max(de_wilcox$logFC, na.rm = TRUE))
         initial_ylim <- c(0, max(-log10(de_wilcox$padj), na.rm = TRUE))
@@ -443,14 +448,14 @@ server <- function(input, output, session) {
           ggplot(de_wilcox, aes(x = logFC, y = -log10(padj), col = DE, label = DEG)) +
             geom_point() +
             ggrepel::geom_text_repel() +
-            geom_vline(xintercept = c(-log(1.1), log(1.1), 0), linetype = "dotted") +
+            geom_vline(xintercept = c(-log2(1.1), log2(1.1), 0), linetype = "dotted") +
             geom_hline(yintercept = -log10(0.01), linetype = "dotted") +
             scale_color_manual(values = c("#909090", "red")) +
             theme_minimal() +
             xlim(input$xlim_min, input$xlim_max) +
             ylim(0, input$ylim_max)
         })
-        incProgress(1.0, detail = "Rendering plot...")
+        incProgress(1.0, detail = "Done!")
         
       }, error = function(e) {
         output$de_volcano <- renderPlot({
@@ -471,29 +476,31 @@ server <- function(input, output, session) {
     content = function(file) {
       req(sc_obj(), input$identity_test, input$genotype1, input$genotype2)
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
-      if ("genotype" %in% colnames(subset_obj@meta.data)) {
-        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
-      }
+      Idents(subset_obj) <- subset_obj$genotype
       
-      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
+      de_res <- FindMarkers(
+        subset_obj,
+        ident.1 = input$genotype2,
+        ident.2 = input$genotype1,
+        test.use = "wilcox",
+        logfc.threshold = 0,
+        min.pct = 0.1
+      )
       
-      subset_obj <- NormalizeData(subset_obj) %>%
-        FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
-      
-      expr_mat <- LayerData(subset_obj, layer = "data")
-      group_vec <- subset_obj$genotype
-      
-      de_wilcox <- wilcoxauc(X = expr_mat, group = group_vec) %>%
-        filter(group == input$genotype2) %>%
-        mutate(DE = abs(logFC) > log(1.1) & padj < 0.01) %>%
-        mutate(DEG = ifelse(DE, feature, NA))
+      de_wilcox <- de_res %>%
+        tibble::rownames_to_column(var = "feature") %>%
+        rename(logFC = avg_log2FC, padj = p_val_adj) %>%
+        mutate(
+          padj = ifelse(padj == 0, .Machine$double.xmin, padj),
+          DE = abs(logFC) > log2(1.1) & padj < 0.01,
+          DEG = ifelse(DE, feature, NA)
+        )
         
       pdf(file, width = 8, height = 6)
       print(ggplot(de_wilcox, aes(x = logFC, y = -log10(padj), col = DE, label = DEG)) +
               geom_point() +
               ggrepel::geom_text_repel() +
-              geom_vline(xintercept = c(-log(1.1), log(1.1), 0), col = "#303030", linetype = "dotted") +
+              geom_vline(xintercept = c(-log2(1.1), log2(1.1), 0), col = "#303030", linetype = "dotted") +
               geom_hline(yintercept = -log10(0.01), col = "#303030", linetype = "dotted") +
               scale_color_manual(values = c("#909090", "red")) +
               theme_minimal() +
@@ -511,23 +518,25 @@ server <- function(input, output, session) {
     content = function(file) {
       req(sc_obj(), input$identity_test, input$genotype1, input$genotype2)
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
-      if ("genotype" %in% colnames(subset_obj@meta.data)) {
-        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
-      }
+      Idents(subset_obj) <- subset_obj$genotype
       
-      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
+      de_res <- FindMarkers(
+        subset_obj,
+        ident.1 = input$genotype2,
+        ident.2 = input$genotype1,
+        test.use = "wilcox",
+        logfc.threshold = 0,
+        min.pct = 0.1
+      )
       
-      subset_obj <- NormalizeData(subset_obj) %>%
-        FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
-      
-      expr_mat <- LayerData(subset_obj, layer = "data")
-      group_vec <- subset_obj$genotype
-      
-      de_wilcox <- wilcoxauc(X = expr_mat, group = group_vec) %>%
-        filter(group == input$genotype2) %>%
-        mutate(DE = abs(logFC) > log(1.1) & padj < 0.01) %>%
-        mutate(DEG = ifelse(DE, feature, NA))
+      de_wilcox <- de_res %>%
+        tibble::rownames_to_column(var = "feature") %>%
+        rename(logFC = avg_log2FC, padj = p_val_adj) %>%
+        mutate(
+          padj = ifelse(padj == 0, .Machine$double.xmin, padj),
+          DE = abs(logFC) > log2(1.1) & padj < 0.01,
+          DEG = ifelse(DE, feature, NA)
+        )
       write.csv(de_wilcox, file, row.names = FALSE)
     }
   )
@@ -608,10 +617,16 @@ server <- function(input, output, session) {
   # --- 7. TABLES ---
   output$cell_count_table <- renderTable({
     req(sc_obj(), input$gene_count)
-    if (input$gene_count %in% rownames(sc_obj()) && "genotype" %in% colnames(sc_obj()@meta.data)) {
-      gene_expr <- FetchData(sc_obj(), vars = c(input$gene_count, "genotype"))
+    if (input$gene_count %in% rownames(sc_obj())) {
+      fetch_vars <- input$gene_count
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) fetch_vars <- c(fetch_vars, "genotype")
+      gene_expr <- FetchData(sc_obj(), vars = fetch_vars)
       gene_sym <- input$gene_count
-      cell_count <- table(subset(gene_expr, gene_expr[[gene_sym]] > 0)$genotype)
+      cell_count <- if ("genotype" %in% colnames(gene_expr)) {
+        table(subset(gene_expr, gene_expr[[gene_sym]] > 0)$genotype)
+      } else {
+        table(gene_expr[[gene_sym]] > 0)
+      }
       t(as.matrix(cell_count))
     }
   }, rownames = TRUE, colnames = TRUE)
@@ -626,13 +641,19 @@ server <- function(input, output, session) {
   
   output$triple_cell_count_table <- renderTable({
     req(sc_obj(), input$gene_x, input$gene_y, input$gene_color)
-    if (all(c(input$gene_x, input$gene_y, input$gene_color) %in% rownames(sc_obj())) && "genotype" %in% colnames(sc_obj()@meta.data)) {
-      gene_expr <- FetchData(sc_obj(), vars = c(input$gene_x, input$gene_y, input$gene_color, "genotype"))
+    if (all(c(input$gene_x, input$gene_y, input$gene_color) %in% rownames(sc_obj()))) {
+      fetch_vars <- c(input$gene_x, input$gene_y, input$gene_color)
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) fetch_vars <- c(fetch_vars, "genotype")
+      gene_expr <- FetchData(sc_obj(), vars = fetch_vars)
       combined_expression <- gene_expr[[input$gene_x]] > 0 & 
         gene_expr[[input$gene_y]] > 0 & 
         gene_expr[[input$gene_color]] > 0
       
-      cell_count <- table(subset(gene_expr, combined_expression)$genotype)
+      cell_count <- if ("genotype" %in% colnames(gene_expr)) {
+        table(subset(gene_expr, combined_expression)$genotype)
+      } else {
+        table(combined_expression)
+      }
       t(as.matrix(cell_count))
     }
   }, rownames = TRUE, colnames = TRUE)
