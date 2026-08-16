@@ -17,7 +17,6 @@ ui <- fluidPage(
   titlePanel("Gene Expression Visualization"),
   theme = bs_theme(version = 5, bootswatch = "lumen"),
   
-  # Define the sidebar
   sidebarLayout(
     sidebarPanel(
       tags$img(
@@ -80,7 +79,6 @@ ui <- fluidPage(
       width = 3
     ),
     
-    # Define the cards
     mainPanel(
       fluidRow(
         column(6,
@@ -166,19 +164,21 @@ ui <- fluidPage(
 server <- function(input, output, session) {
   
   # --- 1. FILE PICKER SETUP (shinyFiles) ---
-  roots <- c(Home = fs::path_home(), getVolumes()())
+  roots <- c(Home = fs::path_home(), shinyFiles::getVolumes()())
   
   shinyFileChoose(
     input, 
     'file_picker', 
     roots = roots, 
-    session = session,
+    session = session, 
     filetypes = c('rds', 'RData', 'rda')
   )
   
   file_path <- reactive({
     req(input$file_picker)
-    parseFilePaths(roots, input$file_picker)$datapath
+    fileinfo <- shinyFiles::parseFilePaths(roots, input$file_picker)
+    req(nrow(fileinfo) > 0)
+    as.character(fileinfo$datapath)
   })
   
   output$loaded_file_info <- renderText({
@@ -209,13 +209,15 @@ server <- function(input, output, session) {
       
       incProgress(0.4, detail = "Configuring cluster levels...")
       
-      obj <- SetIdent(
-        obj, 
-        value = factor(
-          Idents(obj),
-          levels = c("C1", "C2", "C3", "M1", "M2", "M3", "M4", "P1", "P2", "P3", "P4")
-        )
-      )
+      # Retain identity column if present; avoid breaking clusters if levels differ
+      if ("identity" %in% colnames(obj@meta.data)) {
+        Idents(obj) <- obj$identity
+      }
+      
+      target_levels <- c("C1", "C2", "C3", "M1", "M2", "M3", "M4", "P1", "P2", "P3", "P4")
+      if (all(unique(as.character(Idents(obj))) %in% target_levels)) {
+        Idents(obj) <- factor(Idents(obj), levels = target_levels)
+      }
       
       incProgress(0.3, detail = "Done!")
       return(obj)
@@ -225,7 +227,7 @@ server <- function(input, output, session) {
   genes_to_test <- reactive({
     req(sc_obj())
     obj <- sc_obj()
-    rna_genes <- rownames(obj@assays$RNA)
+    rna_genes <- rownames(obj)
     
     Rik.genes <- grep(pattern = "\\d+.*Rik$", x = rna_genes, value = TRUE)
     Rps.genes <- grep(pattern = "^Rps", x = rna_genes, value = TRUE)
@@ -244,20 +246,21 @@ server <- function(input, output, session) {
   # --- 3. DYNAMIC UI RENDERERS ---
   output$identity_test_ui <- renderUI({
     req(sc_obj())
-    identities <- unique(sc_obj()$identity)
+    ident_col <- if ("identity" %in% colnames(sc_obj()@meta.data)) sc_obj()$identity else Idents(sc_obj())
+    identities <- unique(as.character(ident_col))
     selected_val <- if ("C1" %in% identities) "C1" else identities[1]
     selectInput("identity_test", "Select Identity", choices = identities, selected = selected_val)
   })
   
   output$genotype1_ui <- renderUI({
     req(sc_obj())
-    genotypes <- unique(sc_obj()$genotype)
+    genotypes <- if ("genotype" %in% colnames(sc_obj()@meta.data)) unique(as.character(sc_obj()$genotype)) else "Default"
     selectInput("genotype1", "Genotype 1", choices = genotypes, selected = genotypes[1])
   })
   
   output$genotype2_ui <- renderUI({
     req(sc_obj())
-    genotypes <- unique(sc_obj()$genotype)
+    genotypes <- if ("genotype" %in% colnames(sc_obj()@meta.data)) unique(as.character(sc_obj()$genotype)) else "Default"
     selected_val <- if (length(genotypes) > 1) genotypes[2] else genotypes[1]
     selectInput("genotype2", "Genotype 2", choices = genotypes, selected = selected_val)
   })
@@ -280,7 +283,11 @@ server <- function(input, output, session) {
     
     output$featurePlotSplit <- renderPlot({
       req(sc_obj())
-      FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+        FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+      } else {
+        FeaturePlot(sc_obj(), features = input$gene, order = TRUE)
+      }
     })
     
     output$vlnPlot <- renderPlot({
@@ -290,7 +297,11 @@ server <- function(input, output, session) {
     
     output$vlnPlotSplit <- renderPlot({
       req(sc_obj())
-      VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+        VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+      } else {
+        VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1)
+      }
     })
   })
   
@@ -303,24 +314,26 @@ server <- function(input, output, session) {
            paste("Gene", input$gene, "not found in Seurat Object."))
     )
     
-    if (input$gene %in% rownames(sc_obj())){
-      showModal(
-        modalDialog(
-          title = "FeaturePlot Split by Genotype",
-          plotOutput("featurePlotSplitModal", height = "300px", width = "900px"),
-          easyClose = TRUE,
-          footer = tagList(
-            modalButton("Close"),
-            downloadButton("downloadSplitFeature", "Download PDF")
-          )
+    showModal(
+      modalDialog(
+        title = "FeaturePlot Split by Genotype",
+        plotOutput("featurePlotSplitModal", height = "300px", width = "900px"),
+        easyClose = TRUE,
+        footer = tagList(
+          modalButton("Close"),
+          downloadButton("downloadSplitFeature", "Download PDF")
         )
       )
-    }
+    )
   })
   
   output$featurePlotSplitModal <- renderPlot({
     req(sc_obj(), input$gene)
-    FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+    if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+      FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+    } else {
+      FeaturePlot(sc_obj(), features = input$gene, order = TRUE)
+    }
   })
   
   output$downloadSplitFeature <- downloadHandler(
@@ -329,7 +342,11 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(sc_obj(), input$gene)
-      plot_to_save <- FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+      plot_to_save <- if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+        FeaturePlot(sc_obj(), features = input$gene, split.by = "genotype", order = TRUE)
+      } else {
+        FeaturePlot(sc_obj(), features = input$gene, order = TRUE)
+      }
       pdf(file, width = 10, height = 5)
       print(plot_to_save)
       dev.off()
@@ -344,22 +361,24 @@ server <- function(input, output, session) {
       need(input$gene %in% rownames(sc_obj()), "Gene not found")
     )
     
-    if (input$gene %in% rownames(sc_obj())){
-      showModal(modalDialog(
-        title = "Violin Plot - Split by Genotype",
-        plotOutput("vlnPlotSplitModal", height = "300px", width = "900px"),
-        easyClose = TRUE,
-        footer = tagList(
-          modalButton("Close"),
-          downloadButton("downloadSplitVln", "Download PDF")
-        )
-      ))
-    }
+    showModal(modalDialog(
+      title = "Violin Plot - Split by Genotype",
+      plotOutput("vlnPlotSplitModal", height = "300px", width = "900px"),
+      easyClose = TRUE,
+      footer = tagList(
+        modalButton("Close"),
+        downloadButton("downloadSplitVln", "Download PDF")
+      )
+    ))
   })
   
   output$vlnPlotSplitModal <- renderPlot({
     req(sc_obj(), input$gene)
-    VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+    if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+      VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+    } else {
+      VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1)
+    }
   })
   
   output$downloadSplitVln <- downloadHandler(
@@ -368,7 +387,11 @@ server <- function(input, output, session) {
     },
     content = function(file) {
       req(sc_obj(), input$gene)
-      plot_to_save <- VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+      plot_to_save <- if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+        VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1, split.by = 'genotype')
+      } else {
+        VlnPlot(sc_obj(), features = input$gene, pt.size = 0.1)
+      }
       pdf(file, width = 10, height = 5)
       print(plot_to_save)
       dev.off()
@@ -381,12 +404,18 @@ server <- function(input, output, session) {
     
     withProgress(message = "Calculating Differential Expression...", value = 0, {
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
-      subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      
+      if ("genotype" %in% colnames(subset_obj@meta.data)) {
+        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      }
+      
       incProgress(0.1, detail = "Subsetting data...")
+      
+      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
       
       subset_obj <- NormalizeData(subset_obj) %>%
         FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"))
+        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
       incProgress(0.3, detail = "Normalizing data...")
       
       tryCatch({
@@ -396,8 +425,8 @@ server <- function(input, output, session) {
           mutate(DEG = ifelse(DE, feature, NA))
         incProgress(0.7, detail = "Calculating DE...")
         
-        initial_xlim <- c(min(de_wilcox$logFC), max(de_wilcox$logFC))
-        initial_ylim <- c(0, max(-log10(de_wilcox$padj)))
+        initial_xlim <- c(min(de_wilcox$logFC, na.rm = TRUE), max(de_wilcox$logFC, na.rm = TRUE))
+        initial_ylim <- c(0, max(-log10(de_wilcox$padj), na.rm = TRUE))
         
         updateNumericInput(session, "xlim_min", value = round(initial_xlim[1], 2))
         updateNumericInput(session, "xlim_max", value = round(initial_xlim[2], 2))
@@ -439,11 +468,15 @@ server <- function(input, output, session) {
     content = function(file) {
       req(sc_obj(), input$identity_test, input$genotype1, input$genotype2)
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
-      subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      if ("genotype" %in% colnames(subset_obj@meta.data)) {
+        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      }
+      
+      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
       
       subset_obj <- NormalizeData(subset_obj) %>%
         FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"))
+        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
       
       de_wilcox <- wilcoxauc(subset_obj, group_by = "genotype") %>%
         filter(group == input$genotype2) %>%
@@ -472,11 +505,15 @@ server <- function(input, output, session) {
     content = function(file) {
       req(sc_obj(), input$identity_test, input$genotype1, input$genotype2)
       subset_obj <- subset(sc_obj(), idents = c(input$identity_test))
-      subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      if ("genotype" %in% colnames(subset_obj@meta.data)) {
+        subset_obj <- subset(subset_obj, subset = genotype %in% c(input$genotype1, input$genotype2))
+      }
+      
+      vars_to_reg <- intersect(c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"), colnames(subset_obj@meta.data))
       
       subset_obj <- NormalizeData(subset_obj) %>%
         FindVariableFeatures() %>%
-        ScaleData(vars.to.regress = c("nCount_RNA", "nFeature_RNA", "percent.mt", "S.Score", "G2M.Score", "orig.ident"))
+        ScaleData(vars.to.regress = if (length(vars_to_reg) > 0) vars_to_reg else NULL)
       
       de_wilcox <- wilcoxauc(subset_obj, group_by = "genotype") %>%
         filter(group == input$genotype2) %>%
@@ -498,15 +535,19 @@ server <- function(input, output, session) {
              "One or more selected genes not found in Seurat object.")
       )
       pdf(file, width = 7.5, height = 4.5)
-      expr_data <- FetchData(sc_obj(), vars = c(input$gene_x, input$gene_y, input$gene_color, "genotype"))
-      print(ggplot(expr_data, aes_string(x = input$gene_x, y = input$gene_y)) +
-              geom_point(aes_string(color = input$gene_color), size = 2, alpha = 0.8) +
-              scale_color_gradient(low = "grey", high = "red") +
-              labs(color = paste(input$gene_color, "Expression")) +
-              geom_vline(xintercept = 0, linetype = "dashed") +
-              geom_hline(yintercept = 0, linetype = "dashed") +
-              theme_minimal() +
-              facet_wrap(~ genotype))
+      fetch_vars <- c(input$gene_x, input$gene_y, input$gene_color)
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) fetch_vars <- c(fetch_vars, "genotype")
+      expr_data <- FetchData(sc_obj(), vars = fetch_vars)
+      
+      p <- ggplot(expr_data, aes_string(x = input$gene_x, y = input$gene_y)) +
+        geom_point(aes_string(color = input$gene_color), size = 2, alpha = 0.8) +
+        scale_color_gradient(low = "grey", high = "red") +
+        labs(color = paste(input$gene_color, "Expression")) +
+        geom_vline(xintercept = 0, linetype = "dashed") +
+        geom_hline(yintercept = 0, linetype = "dashed") +
+        theme_minimal()
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) p <- p + facet_wrap(~ genotype)
+      print(p)
       dev.off()
     }
   )
@@ -518,7 +559,11 @@ server <- function(input, output, session) {
     content = function(file) {
       req(sc_obj())
       pdf(file, width = 7.5, height = 4.5)
-      print(DimPlot(sc_obj(), group.by = 'identity', reduction = "umap", label = TRUE, label.size = 6))
+      if ("identity" %in% colnames(sc_obj()@meta.data)) {
+        print(DimPlot(sc_obj(), group.by = 'identity', label = TRUE, label.size = 6))
+      } else {
+        print(DimPlot(sc_obj(), label = TRUE, label.size = 6))
+      }
       dev.off()
     }
   )
@@ -554,7 +599,7 @@ server <- function(input, output, session) {
   # --- 7. TABLES ---
   output$cell_count_table <- renderTable({
     req(sc_obj(), input$gene_count)
-    if (input$gene_count %in% rownames(sc_obj())) {
+    if (input$gene_count %in% rownames(sc_obj()) && "genotype" %in% colnames(sc_obj()@meta.data)) {
       gene_expr <- FetchData(sc_obj(), vars = c(input$gene_count, "genotype"))
       gene_sym <- input$gene_count
       cell_count <- table(subset(gene_expr, gene_expr[[gene_sym]] > 0)$genotype)
@@ -564,13 +609,15 @@ server <- function(input, output, session) {
   
   output$total_cell_count_table <- renderTable({
     req(sc_obj())
-    total_cell_count <- table(sc_obj()$genotype)
-    t(as.matrix(total_cell_count))
+    if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+      total_cell_count <- table(sc_obj()$genotype)
+      t(as.matrix(total_cell_count))
+    }
   }, rownames = TRUE, colnames = TRUE)
   
   output$triple_cell_count_table <- renderTable({
     req(sc_obj(), input$gene_x, input$gene_y, input$gene_color)
-    if (all(c(input$gene_x, input$gene_y, input$gene_color) %in% rownames(sc_obj()))) {
+    if (all(c(input$gene_x, input$gene_y, input$gene_color) %in% rownames(sc_obj())) && "genotype" %in% colnames(sc_obj()@meta.data)) {
       gene_expr <- FetchData(sc_obj(), vars = c(input$gene_x, input$gene_y, input$gene_color, "genotype"))
       combined_expression <- gene_expr[[input$gene_x]] > 0 & 
         gene_expr[[input$gene_y]] > 0 & 
@@ -584,7 +631,11 @@ server <- function(input, output, session) {
   # --- 8. INITIAL DIMPLOT & HEATMAP ---
   output$dimPlot <- renderPlot({
     req(sc_obj())
-    DimPlot(sc_obj(), group.by = 'identity', reduction = "umap", label = TRUE, label.size = 6)
+    if ("identity" %in% colnames(sc_obj()@meta.data)) {
+      DimPlot(sc_obj(), group.by = 'identity', label = TRUE, label.size = 6)
+    } else {
+      DimPlot(sc_obj(), label = TRUE, label.size = 6)
+    }
   })
   
   observeEvent(input$showHeatmap, {
@@ -656,15 +707,19 @@ server <- function(input, output, session) {
            "One or more selected genes not found in Seurat object.")
     )
     if (all(c(input$gene_x, input$gene_y, input$gene_color) %in% rownames(sc_obj()))) {
-      expr_data <- FetchData(sc_obj(), vars = c(input$gene_x, input$gene_y, input$gene_color, "genotype"))
-      ggplot(expr_data, aes_string(x = input$gene_x, y = input$gene_y)) +
+      fetch_vars <- c(input$gene_x, input$gene_y, input$gene_color)
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) fetch_vars <- c(fetch_vars, "genotype")
+      expr_data <- FetchData(sc_obj(), vars = fetch_vars)
+      
+      p <- ggplot(expr_data, aes_string(x = input$gene_x, y = input$gene_y)) +
         geom_point(aes_string(color = input$gene_color), size = 2, alpha = 0.8) +
         scale_color_gradient(low = "grey", high = "red") +
         labs(color = paste(input$gene_color, "Expression")) +
         geom_vline(xintercept = 0, linetype = "dashed") +
         geom_hline(yintercept = 0, linetype = "dashed") +
-        theme_minimal() +
-        facet_wrap(~ genotype)
+        theme_minimal()
+      if ("genotype" %in% colnames(sc_obj()@meta.data)) p <- p + facet_wrap(~ genotype)
+      p
     }
   })
 
@@ -715,15 +770,26 @@ server <- function(input, output, session) {
       color3_val <- default_color3
       
       output$blendedPlotSplitModal <- renderPlot({
-        FeaturePlot(
-          sc_obj(), 
-          features = c(input$gene1, input$gene2), 
-          blend = TRUE,
-          order = TRUE, 
-          blend.threshold = 0.1,
-          split.by = 'genotype',
-          cols = c(color3_val, color1_val, color2_val)
-        )
+        if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+          FeaturePlot(
+            sc_obj(), 
+            features = c(input$gene1, input$gene2), 
+            blend = TRUE, 
+            order = TRUE, 
+            blend.threshold = 0.1, 
+            split.by = 'genotype', 
+            cols = c(color3_val, color1_val, color2_val)
+          )
+        } else {
+          FeaturePlot(
+            sc_obj(), 
+            features = c(input$gene1, input$gene2), 
+            blend = TRUE, 
+            order = TRUE, 
+            blend.threshold = 0.1, 
+            cols = c(color3_val, color1_val, color2_val)
+          )
+        }
       })
       
       showModal(
@@ -760,15 +826,26 @@ server <- function(input, output, session) {
       color2_val <- ifelse(is.null(input$color2) || input$color2 == "", default_color2, input$color2)
       color3_val <- default_color3
       
-      plot_to_save <- FeaturePlot(
-        sc_obj(), 
-        features = c(input$gene1, input$gene2), 
-        blend = TRUE,
-        order = TRUE, 
-        blend.threshold = 0.1,
-        split.by = 'genotype',
-        cols = c(color3_val, color1_val, color2_val)
-      )
+      plot_to_save <- if ("genotype" %in% colnames(sc_obj()@meta.data)) {
+        FeaturePlot(
+          sc_obj(), 
+          features = c(input$gene1, input$gene2), 
+          blend = TRUE, 
+          order = TRUE, 
+          blend.threshold = 0.1, 
+          split.by = 'genotype', 
+          cols = c(color3_val, color1_val, color2_val)
+        )
+      } else {
+        FeaturePlot(
+          sc_obj(), 
+          features = c(input$gene1, input$gene2), 
+          blend = TRUE, 
+          order = TRUE, 
+          blend.threshold = 0.1, 
+          cols = c(color3_val, color1_val, color2_val)
+        )
+      }
       
       pdf(file, width = 12, height = 8)
       print(plot_to_save)
